@@ -4,40 +4,87 @@ import re
 from pathlib import Path
 
 
-def find_required_arguments(source):
-    """Return the number of required positional arguments per function."""
+def find_functions(source):
+    """Extract top-level function signatures from Python source."""
     tree = ast.parse(source)
     functions = {}
 
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            positional = node.args.posonlyargs + node.args.args
+            required_count = len(positional) - len(node.args.defaults)
 
-        positional = node.args.posonlyargs + node.args.args
-        defaults = node.args.defaults
+            required_names = [
+                arg.arg for arg in positional[:required_count]
+            ]
 
-        required_count = len(positional) - len(defaults)
-        functions[node.name] = required_count
+            required_keyword_only = [
+                arg.arg
+                for arg, default in zip(
+                    node.args.kwonlyargs,
+                    node.args.kw_defaults,
+                )
+                if default is None
+            ]
+
+            functions[node.name] = {
+                "required_count": required_count,
+                "required_names": required_names,
+                "required_keyword_only": required_keyword_only,
+                "positional_only_count": len(node.args.posonlyargs),
+                "positional_names": [arg.arg for arg in positional],
+                "has_varargs": node.args.vararg is not None,
+                "has_kwargs": node.args.kwarg is not None,
+            }
 
     return functions
 
 
+def check_call(node, signature):
+    """Return missing required parameter names for a simple function call."""
+    positional_names = signature["positional_names"]
+    positional_only_count = signature["positional_only_count"]
+
+    # Positional arguments fill parameters from left to right.
+    supplied_names = set(positional_names[:len(node.args)])
+
+    # Keyword arguments can fill parameters unless they are positional-only.
+    for keyword in node.keywords:
+        if keyword.arg is not None:
+            if keyword.arg not in positional_names[:positional_only_count]:
+                supplied_names.add(keyword.arg)
+
+    required_names = (
+        signature["required_names"]
+        + signature["required_keyword_only"]
+    )
+
+    missing = [
+        name for name in required_names
+        if name not in supplied_names
+    ]
+
+    return missing
+
+
 def scan_documentation(source, readme):
-    """Find README calls that supply too few positional arguments."""
-    functions = find_required_arguments(source)
+    """Find README calls that omit required arguments."""
+    functions = find_functions(source)
     issues = []
 
     code_blocks = re.findall(
         r"```python\s*(.*?)```",
         readme,
-        flags=re.DOTALL,
+        flags=re.DOTALL | re.IGNORECASE,
     )
 
-    for block in code_blocks:
+    for block_number, block in enumerate(code_blocks, start=1):
         try:
             tree = ast.parse(block)
         except SyntaxError:
-            issues.append("Could not parse a Python example in README.md.")
+            issues.append(
+                f"README Python block {block_number} contains invalid syntax."
+            )
             continue
 
         for node in ast.walk(tree):
@@ -52,51 +99,13 @@ def scan_documentation(source, readme):
             if name not in functions:
                 continue
 
-            required = functions[name]
-            supplied = len(node.args)
+            signature = functions[name]
+            missing = check_call(node, signature)
 
-            # Keyword arguments can satisfy required parameters.
-            supplied_names = {
-                keyword.arg
-                for keyword in node.keywords
-                if keyword.arg is not None
-            }
-
-            # Find the function definition to identify parameter names.
-            source_tree = ast.parse(source)
-            definition = next(
-                (
-                    item
-                    for item in ast.walk(source_tree)
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and item.name == name
-                ),
-                None,
-            )
-
-            if definition is None:
-                continue
-
-            positional = (
-                definition.args.posonlyargs + definition.args.args
-            )
-            required_names = [
-                arg.arg
-                for arg in positional[:required]
-            ]
-
-            satisfied = sum(
-                1 for arg in required_names
-                if arg in supplied_names
-            )
-
-            missing = max(0, required - supplied - satisfied)
-
-            if missing > 0:
+            if missing:
                 issues.append(
-                    f"{name}() may be missing {missing} required "
-                    f"argument(s): requires {required}, "
-                    f"example supplies {supplied} positional argument(s)."
+                    f"{name}() may be missing required argument(s): "
+                    f"{', '.join(missing)}."
                 )
 
     return issues
