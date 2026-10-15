@@ -135,5 +135,56 @@ def greet(name, greeting):
             self.assertIn("README.md not found", issues[0])
 
 
+    def test_detects_missing_positional_only_argument(self):
+        source = '''
+def greet(name, /, greeting="Hello"):
+    return f"{greeting}, {name}!"
+'''
+        readme = '''
+```python
+greet(name="Manan")
+```
+'''
+        issues = scan_documentation(source, readme)
+
+        self.assertEqual(len(issues), 1)
+        self.assertIn("name", issues[0])
+
+
+    def test_warns_about_duplicate_function_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+
+            (project / "first.py").write_text(
+                "def greet(name):\n"
+                "    return name\n",
+                encoding="utf-8",
+            )
+
+            (project / "second.py").write_text(
+                "def greet(name, greeting):\n"
+                "    return greeting, name\n",
+                encoding="utf-8",
+            )
+
+            (project / "README.md").write_text(
+                "# Demo\n\n"
+                "```python\n"
+                'greet("Manan")\n'
+                "```\n",
+                encoding="utf-8",
+            )
+
+            issues = scan_project(project)
+
+            self.assertTrue(
+                any(
+                    "multiple Python files" in issue
+                    and "greet" in issue
+                    for issue in issues
+                )
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
