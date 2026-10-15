@@ -74,6 +74,14 @@ CASES = [
         "code": "add(*[1, 2])",
         "should_warn": False,
     },
+    
+    {
+        "name": "Dictionary unpacking in a call",
+        "code": 'greet(**{"name": "Manan", "greeting": "Hello"})',
+        "should_warn": False,
+    },
+
+    
 ]
 
 

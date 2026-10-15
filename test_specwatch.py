@@ -202,5 +202,21 @@ add(*[1, 2])
         self.assertEqual(issues, [])
 
 
+    def test_accepts_dictionary_unpacking(self):
+        source = """
+def greet(name, greeting):
+    return f"{greeting}, {name}!"
+"""
+        readme = '''
+```python
+greet(**{"name": "Manan", "greeting": "Hello"})
+```
+'''
+        issues = scan_documentation(source, readme)
+
+        self.assertEqual(issues, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
