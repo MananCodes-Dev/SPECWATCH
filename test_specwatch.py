@@ -1,7 +1,9 @@
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from specwatch import scan_documentation
+from specwatch import scan_documentation, scan_project
 
 
 class TestSpecwatch(unittest.TestCase):
@@ -81,7 +83,56 @@ calculate_average(
         issues = scan_documentation(self.source, readme)
 
         self.assertEqual(len(issues), 1)
-        self.assertIn("invalid syntax", issues[0])
+        self.assertIn("Invalid Python example", issues[0])
+
+    def test_reports_readme_line_number(self):
+        source = """
+def greet(name, greeting):
+    return f"{greeting}, {name}"
+"""
+        readme = (
+            "# Demo\n"
+            "\n"
+            "```python\n"
+            'greet("Manan")\n'
+            "```\n"
+        )
+
+        issues = scan_documentation(source, readme)
+
+        self.assertEqual(len(issues), 1)
+        self.assertIn("README.md:4:", issues[0])
+
+    def test_scans_project_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+
+            (project / "example.py").write_text(
+                'def greet(name, greeting):\n'
+                '    return f"{greeting}, {name}"\n',
+                encoding="utf-8",
+            )
+
+            (project / "README.md").write_text(
+                "# Demo\n"
+                "\n"
+                "```python\n"
+                'greet("Manan")\n'
+                "```\n",
+                encoding="utf-8",
+            )
+
+            issues = scan_project(project)
+
+            self.assertEqual(len(issues), 1)
+            self.assertIn("greeting", issues[0])
+
+    def test_reports_missing_readme(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            issues = scan_project(temp_dir)
+
+            self.assertEqual(len(issues), 1)
+            self.assertIn("README.md not found", issues[0])
 
 
 if __name__ == "__main__":

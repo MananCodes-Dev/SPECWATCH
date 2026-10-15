@@ -5,84 +5,128 @@ import re
 from pathlib import Path
 
 
-IGNORED_DIRECTORIES = {".venv", ".git", "__pycache__"}
+IGNORED_DIRECTORIES = {
+    ".venv",
+    ".git",
+    "__pycache__",
+}
 
 
 def find_functions(source):
-    """Extract function signatures from Python source."""
-    tree = ast.parse(source)
+    """Find Python functions and their required arguments."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+
     functions = {}
 
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
 
-        positional = node.args.posonlyargs + node.args.args
-        required_count = len(positional) - len(node.args.defaults)
+        args = node.args
+
+        positional_only = args.posonlyargs
+        positional_or_keyword = args.args
+        positional = positional_only + positional_or_keyword
+
+        defaults_count = len(args.defaults)
+        required_count = len(positional) - defaults_count
+
+        required_positional = [
+            arg.arg for arg in positional[:required_count]
+        ]
+
+        required_keyword_only = [
+            arg.arg
+            for arg, default in zip(
+                args.kwonlyargs,
+                args.kw_defaults,
+            )
+            if default is None
+        ]
 
         functions[node.name] = {
-            "required_names": [
-                arg.arg for arg in positional[:required_count]
+            "required_names": required_positional,
+            "positional_only_names": [
+                arg.arg for arg in positional_only
             ],
-            "positional_only_count": len(node.args.posonlyargs),
-            "positional_names": [arg.arg for arg in positional],
-            "required_keyword_only": [
-                arg.arg
-                for arg, default in zip(
-                    node.args.kwonlyargs,
-                    node.args.kw_defaults,
-                )
-                if default is None
+            "positional_names": [
+                arg.arg for arg in positional
             ],
+            "required_keyword_only": required_keyword_only,
         }
 
     return functions
 
 
 def check_call(node, signature):
-    """Return missing required parameters for a simple function call."""
+    """Return the required arguments missing from a function call."""
     positional_names = signature["positional_names"]
-    positional_only_count = signature["positional_only_count"]
+    positional_only_names = signature["positional_only_names"]
+    required_names = signature["required_names"]
+    required_keyword_only = signature["required_keyword_only"]
 
-    supplied_names = set(positional_names[:len(node.args)])
-
-    for keyword in node.keywords:
-        if keyword.arg is not None:
-            if keyword.arg not in positional_names[:positional_only_count]:
-                supplied_names.add(keyword.arg)
-
-    required_names = (
-        signature["required_names"]
-        + signature["required_keyword_only"]
+    supplied_positionally = set(
+        positional_names[:len(node.args)]
     )
 
-    return [
-        name for name in required_names
-        if name not in supplied_names
-    ]
+    supplied_by_keyword = {
+        keyword.arg
+        for keyword in node.keywords
+        if keyword.arg is not None
+    }
+
+    missing = []
+
+    for name in required_names:
+        if name in supplied_positionally:
+            continue
+
+        # Positional-only arguments cannot be supplied by keyword.
+        if name in positional_only_names:
+            missing.append(name)
+        elif name not in supplied_by_keyword:
+            missing.append(name)
+
+    for name in required_keyword_only:
+        if name not in supplied_by_keyword:
+            missing.append(name)
+
+    return missing
 
 
 def scan_documentation(source, readme):
-    """Find missing arguments in Python examples."""
+    """Scan Python code examples in README text."""
     functions = find_functions(source)
+    return scan_documentation_from_functions(readme, functions)
+
+
+def scan_documentation_from_functions(readme, functions):
+    """Check function calls inside fenced Python examples."""
     issues = []
 
     pattern = re.compile(
-        r"```python\s*(.*?)```",
-        flags=re.DOTALL | re.IGNORECASE,
+        r"```(?:python|py|python3)\s*\n(.*?)```",
+        re.IGNORECASE | re.DOTALL,
     )
 
-    for block_number, match in enumerate(pattern.finditer(readme), start=1):
-        block = match.group(1)
-        block_start_line = readme.count("\n", 0, match.start(1)) + 1
+    for match in pattern.finditer(readme):
+        code = match.group(1)
+
+        # Find the actual starting line of this code block.
+        block_start_line = (
+            readme.count("\n", 0, match.start(1)) + 1
+        )
 
         try:
-            tree = ast.parse(block)
+            tree = ast.parse(code)
         except SyntaxError as error:
             line = block_start_line + (error.lineno or 1) - 1
             issues.append(
-                f"README.md:{line}: Python block {block_number} "
-                "contains invalid syntax."
+                f"README.md:{line}: Invalid Python example: "
+                f"{error.msg}"
             )
             continue
 
@@ -93,121 +137,107 @@ def scan_documentation(source, readme):
             if not isinstance(node.func, ast.Name):
                 continue
 
-            name = node.func.id
+            function_name = node.func.id
 
-            if name not in functions:
+            if function_name not in functions:
                 continue
 
-            missing = check_call(node, functions[name])
+            signature = functions[function_name]
+            missing = check_call(node, signature)
 
             if missing:
                 line = block_start_line + node.lineno - 1
+                names = ", ".join(missing)
+
                 issues.append(
-                    f"README.md:{line}: {name}() may be missing "
-                    f"required argument(s): {', '.join(missing)}."
+                    f"README.md:{line}: Possible missing "
+                    f"argument(s) for '{function_name}': {names}"
                 )
 
     return issues
 
 
 def scan_project(project_path):
-    """Scan a project's README against its Python functions."""
+    """Scan Python files in a project and check its README."""
     project_path = Path(project_path).resolve()
-    readme_path = project_path / "README.md"
+
+    if not project_path.exists():
+        return [f"Error: Project path does not exist: {project_path}"]
 
     if not project_path.is_dir():
-        raise NotADirectoryError(
-            f"Project directory not found: {project_path}"
-        )
+        return [f"Error: Project path is not a directory: {project_path}"]
+
+    readme_path = project_path / "README.md"
 
     if not readme_path.is_file():
-        raise FileNotFoundError(
-            f"README.md not found in {project_path}"
-        )
+        return [f"Error: README.md not found in {project_path}"]
 
-    readme = readme_path.read_text(encoding="utf-8")
+    try:
+        readme = readme_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return [f"Error reading README.md: {error}"]
+
     all_functions = {}
+    duplicate_names = set()
     issues = []
 
-    for python_file in project_path.rglob("*.py"):
-        if any(part in IGNORED_DIRECTORIES for part in python_file.parts):
+    for file_path in project_path.rglob("*.py"):
+        relative_path = file_path.relative_to(project_path)
+
+        if any(
+            part in IGNORED_DIRECTORIES
+            for part in relative_path.parts
+        ):
             continue
 
         try:
-            source = python_file.read_text(encoding="utf-8")
-            functions = find_functions(source)
+            source = file_path.read_text(encoding="utf-8")
+        except OSError as error:
+            issues.append(
+                f"Warning: Could not read {relative_path}: {error}"
+            )
+            continue
 
-            for name, signature in functions.items():
-                if name in all_functions:
-                    issues.append(
-                        f"WARNING: Duplicate function name '{name}' "
-                        "found in multiple files; results may be ambiguous."
-                    )
+        try:
+            ast.parse(source)
+        except SyntaxError as error:
+            issues.append(
+                f"Warning: Invalid Python in {relative_path}, "
+                f"line {error.lineno}: {error.msg}"
+            )
+            continue
 
+        functions = find_functions(source)
+
+        for name, signature in functions.items():
+            if name in all_functions:
+                duplicate_names.add(name)
+            else:
                 all_functions[name] = signature
 
-        except (OSError, SyntaxError) as error:
-            issues.append(
-                f"Could not analyze {python_file}: {error}"
-            )
+    # Avoid guessing which function is intended when names collide.
+    for name in duplicate_names:
+        all_functions.pop(name, None)
 
-    # Check the README against all discovered function signatures.
-    for issue in scan_documentation_from_functions(readme, all_functions):
-        issues.append(issue)
+    if duplicate_names:
+        names = ", ".join(sorted(duplicate_names))
+        issues.append(
+            "Warning: Skipped function names found in multiple "
+            f"Python files: {names}"
+        )
 
-    return issues
-
-
-def scan_documentation_from_functions(readme, functions):
-    """Check README examples against discovered project functions."""
-    issues = []
-
-    pattern = re.compile(
-        r"```python\s*(.*?)```",
-        flags=re.DOTALL | re.IGNORECASE,
+    issues.extend(
+        scan_documentation_from_functions(readme, all_functions)
     )
-
-    for block_number, match in enumerate(pattern.finditer(readme), start=1):
-        block = match.group(1)
-        block_start_line = readme.count("\n", 0, match.start(1)) + 1
-
-        try:
-            tree = ast.parse(block)
-        except SyntaxError as error:
-            line = block_start_line + (error.lineno or 1) - 1
-            issues.append(
-                f"README.md:{line}: Python block {block_number} "
-                "contains invalid syntax."
-            )
-            continue
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-
-            if not isinstance(node.func, ast.Name):
-                continue
-
-            name = node.func.id
-
-            if name not in functions:
-                continue
-
-            missing = check_call(node, functions[name])
-
-            if missing:
-                line = block_start_line + node.lineno - 1
-                issues.append(
-                    f"README.md:{line}: {name}() may be missing "
-                    f"required argument(s): {', '.join(missing)}."
-                )
 
     return issues
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Detect potential code/documentation mismatches."
+        description=(
+            "SPECWATCH: Check Python function calls in README examples."
+        )
     )
 
     parser.add_argument(
@@ -218,21 +248,20 @@ def main():
 
     args = parser.parse_args()
 
-    try:
-        issues = scan_project(args.project)
-    except (OSError, UnicodeError) as error:
-        print(f"ERROR: {error}")
-        return 1
+    print(f"Scanning project: {args.project}")
+
+    issues = scan_project(args.project)
 
     if issues:
-        for issue in issues:
-            print(f"WARNING: {issue}")
-    else:
-        print("No missing-argument issues detected.")
+        print("\nFindings:")
 
-    print("Scan complete.")
-    return 0
+        for issue in issues:
+            print(f"- {issue}")
+    else:
+        print("\nNo issues found.")
+
+    print("\nScan complete.")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
