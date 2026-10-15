@@ -26,7 +26,6 @@ def find_functions(source):
             continue
 
         args = node.args
-
         positional_only = args.posonlyargs
         positional_or_keyword = args.args
         positional = positional_only + positional_or_keyword
@@ -62,14 +61,20 @@ def find_functions(source):
 
 
 def check_call(node, signature):
-    """Return the required arguments missing from a function call."""
+    """Return required arguments that appear to be missing."""
     positional_names = signature["positional_names"]
     positional_only_names = signature["positional_only_names"]
     required_names = signature["required_names"]
     required_keyword_only = signature["required_keyword_only"]
 
-    supplied_positionally = set(
-        positional_names[:len(node.args)]
+    has_starred_args = any(
+        isinstance(arg, ast.Starred)
+        for arg in node.args
+    )
+
+    has_kwargs_unpacking = any(
+        keyword.arg is None
+        for keyword in node.keywords
     )
 
     supplied_by_keyword = {
@@ -78,20 +83,40 @@ def check_call(node, signature):
         if keyword.arg is not None
     }
 
+    # Starred arguments can supply an unknown number of positional
+    # arguments. Avoid making unreliable positional-argument claims.
+    if has_starred_args:
+        missing = [
+            name
+            for name in required_keyword_only
+            if name not in supplied_by_keyword
+            and not has_kwargs_unpacking
+        ]
+        return missing
+
+    supplied_positionally = set(
+        positional_names[:len(node.args)]
+    )
+
     missing = []
 
     for name in required_names:
         if name in supplied_positionally:
             continue
 
-        # Positional-only arguments cannot be supplied by keyword.
         if name in positional_only_names:
             missing.append(name)
-        elif name not in supplied_by_keyword:
+        elif (
+            name not in supplied_by_keyword
+            and not has_kwargs_unpacking
+        ):
             missing.append(name)
 
     for name in required_keyword_only:
-        if name not in supplied_by_keyword:
+        if (
+            name not in supplied_by_keyword
+            and not has_kwargs_unpacking
+        ):
             missing.append(name)
 
     return missing
@@ -114,8 +139,6 @@ def scan_documentation_from_functions(readme, functions):
 
     for match in pattern.finditer(readme):
         code = match.group(1)
-
-        # Find the actual starting line of this code block.
         block_start_line = (
             readme.count("\n", 0, match.start(1)) + 1
         )
@@ -142,8 +165,7 @@ def scan_documentation_from_functions(readme, functions):
             if function_name not in functions:
                 continue
 
-            signature = functions[function_name]
-            missing = check_call(node, signature)
+            missing = check_call(node, functions[function_name])
 
             if missing:
                 line = block_start_line + node.lineno - 1
@@ -162,15 +184,21 @@ def scan_project(project_path):
     project_path = Path(project_path).resolve()
 
     if not project_path.exists():
-        return [f"Error: Project path does not exist: {project_path}"]
+        return [
+            f"Error: Project path does not exist: {project_path}"
+        ]
 
     if not project_path.is_dir():
-        return [f"Error: Project path is not a directory: {project_path}"]
+        return [
+            f"Error: Project path is not a directory: {project_path}"
+        ]
 
     readme_path = project_path / "README.md"
 
     if not readme_path.is_file():
-        return [f"Error: README.md not found in {project_path}"]
+        return [
+            f"Error: README.md not found in {project_path}"
+        ]
 
     try:
         readme = readme_path.read_text(encoding="utf-8")
@@ -215,7 +243,6 @@ def scan_project(project_path):
             else:
                 all_functions[name] = signature
 
-    # Avoid guessing which function is intended when names collide.
     for name in duplicate_names:
         all_functions.pop(name, None)
 
@@ -249,12 +276,10 @@ def main():
     args = parser.parse_args()
 
     print(f"Scanning project: {args.project}")
-
     issues = scan_project(args.project)
 
     if issues:
         print("\nFindings:")
-
         for issue in issues:
             print(f"- {issue}")
     else:

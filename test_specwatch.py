@@ -186,5 +186,21 @@ greet(name="Manan")
             )
 
 
+
+    def test_accepts_starred_positional_arguments(self):
+        source = """
+def add(a, b):
+    return a + b
+"""
+        readme = """
+```python
+add(*[1, 2])
+```
+"""
+        issues = scan_documentation(source, readme)
+
+        self.assertEqual(issues, [])
+
+
 if __name__ == "__main__":
     unittest.main()
