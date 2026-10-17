@@ -13,7 +13,7 @@ IGNORED_DIRECTORIES = {
 
 
 def find_functions(source):
-    """Find Python functions and their required arguments."""
+    """Find module-level Python functions and their required arguments."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -21,7 +21,9 @@ def find_functions(source):
 
     functions = {}
 
-    for node in ast.walk(tree):
+    # Only inspect module-level definitions. Nested functions should not
+    # overwrite a module-level function with the same name.
+    for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
 
@@ -84,15 +86,14 @@ def check_call(node, signature):
     }
 
     # Starred arguments can supply an unknown number of positional
-    # arguments. Avoid making unreliable positional-argument claims.
+    # arguments. Avoid unreliable positional-argument warnings.
     if has_starred_args:
-        missing = [
+        return [
             name
             for name in required_keyword_only
             if name not in supplied_by_keyword
             and not has_kwargs_unpacking
         ]
-        return missing
 
     supplied_positionally = set(
         positional_names[:len(node.args)]
@@ -157,6 +158,8 @@ def scan_documentation_from_functions(readme, functions):
             if not isinstance(node, ast.Call):
                 continue
 
+            # Currently handles simple calls such as greet("Manan"),
+            # not attribute calls such as service.greet("Manan").
             if not isinstance(node.func, ast.Name):
                 continue
 
@@ -243,6 +246,8 @@ def scan_project(project_path):
             else:
                 all_functions[name] = signature
 
+    # Skip ambiguous names rather than guessing which file's function
+    # a README example intends to call.
     for name in duplicate_names:
         all_functions.pop(name, None)
 
