@@ -81,6 +81,13 @@ CASES = [
         "should_warn": False,
     },
 
+
+    {
+        "name": "Nested function call with missing argument",
+        "code": 'greet(str("Manan"))',
+        "should_warn": True,
+    },
+
     
 ]
 
@@ -150,3 +157,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ 

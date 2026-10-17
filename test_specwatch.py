@@ -217,6 +217,22 @@ greet(**{"name": "Manan", "greeting": "Hello"})
         self.assertEqual(issues, [])
 
 
+    def test_detects_missing_argument_in_nested_call(self):
+        source = """
+def greet(name, greeting):
+    return f"{greeting}, {name}!"
+"""
+        readme = '''
+```python
+greet(str("Manan"))
+```
+'''
+        issues = scan_documentation(source, readme)
+
+        self.assertEqual(len(issues), 1)
+        self.assertIn("greeting", issues[0])
+
+
 
 if __name__ == "__main__":
     unittest.main()
