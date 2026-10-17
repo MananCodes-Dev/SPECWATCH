@@ -233,6 +233,26 @@ greet(str("Manan"))
         self.assertIn("greeting", issues[0])
 
 
+    def test_nested_function_does_not_override_module_function(self):
+        source = """
+def greet(name, greeting):
+    return f"{greeting}, {name}!"
+
+def wrapper():
+    def greet(name):
+        return name
+"""
+        readme = '''
+```python
+greet("Manan")
+```
+'''
+        issues = scan_documentation(source, readme)
+
+        self.assertEqual(len(issues), 1)
+        self.assertIn("greeting", issues[0])
+
+
 
 if __name__ == "__main__":
     unittest.main()
