@@ -273,6 +273,56 @@ greet("Manan")
         self.assertIn("greeting", issues[0])
 
 
+    def test_detects_missing_argument_in_literal_starred_list(self):
+        source = """
+def greet(name, greeting):
+    return f"{greeting}, {name}!"
+"""
+        readme = '''
+```python
+greet(*["Manan"])
+```
+'''
+        issues = scan_documentation(source, readme)
+
+        self.assertEqual(len(issues), 1)
+        self.assertIn("greeting", issues[0])
+
+    def test_detects_missing_argument_in_literal_dictionary_unpacking(self):
+        source = """
+def greet(name, greeting):
+    return f"{greeting}, {name}!"
+"""
+        readme = '''
+```python
+greet(**{"name": "Manan"})
+```
+'''
+        issues = scan_documentation(source, readme)
+
+        self.assertEqual(len(issues), 1)
+        self.assertIn("greeting", issues[0])
+
+    def test_detects_duplicate_positional_and_keyword_argument(self):
+        source = """
+def greet(name, greeting):
+    return f"{greeting}, {name}!"
+"""
+        readme = '''
+```python
+greet("Manan", name="Other", greeting="Hello")
+```
+'''
+        issues = scan_documentation(source, readme)
+
+        self.assertTrue(
+            any("multiple values" in issue for issue in issues)
+        )
+        self.assertTrue(
+            any("'name'" in issue for issue in issues)
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()

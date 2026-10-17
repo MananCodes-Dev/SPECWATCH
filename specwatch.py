@@ -1,15 +1,10 @@
 
-import argparse
 import ast
 import re
 from pathlib import Path
 
 
-IGNORED_DIRECTORIES = {
-    ".venv",
-    ".git",
-    "__pycache__",
-}
+IGNORED_DIRS = {".git", ".venv", "__pycache__"}
 
 
 def find_functions(source):
@@ -21,8 +16,6 @@ def find_functions(source):
 
     functions = {}
 
-    # Only inspect module-level definitions. Nested functions should not
-    # overwrite a module-level function with the same name.
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -69,34 +62,58 @@ def check_call(node, signature):
     required_names = signature["required_names"]
     required_keyword_only = signature["required_keyword_only"]
 
-    has_starred_args = any(
-        isinstance(arg, ast.Starred)
-        for arg in node.args
-    )
-
-    has_kwargs_unpacking = any(
-        keyword.arg is None
-        for keyword in node.keywords
-    )
-
     supplied_by_keyword = {
         keyword.arg
         for keyword in node.keywords
         if keyword.arg is not None
     }
 
-    # Starred arguments can supply an unknown number of positional
-    # arguments. Avoid unreliable positional-argument warnings.
-    if has_starred_args:
+    has_unknown_kwargs = False
+
+    for keyword in node.keywords:
+        if keyword.arg is not None:
+            continue
+
+        value = keyword.value
+
+        if not isinstance(value, ast.Dict):
+            has_unknown_kwargs = True
+            continue
+
+        for key in value.keys:
+            if (
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+            ):
+                supplied_by_keyword.add(key.value)
+            else:
+                has_unknown_kwargs = True
+
+    positional_count = 0
+    has_unknown_starred_args = False
+
+    for arg in node.args:
+        if not isinstance(arg, ast.Starred):
+            positional_count += 1
+            continue
+
+        value = arg.value
+
+        if isinstance(value, (ast.List, ast.Tuple)):
+            positional_count += len(value.elts)
+        else:
+            has_unknown_starred_args = True
+
+    if has_unknown_starred_args:
         return [
             name
             for name in required_keyword_only
             if name not in supplied_by_keyword
-            and not has_kwargs_unpacking
+            and not has_unknown_kwargs
         ]
 
     supplied_positionally = set(
-        positional_names[:len(node.args)]
+        positional_names[:positional_count]
     )
 
     missing = []
@@ -109,18 +126,57 @@ def check_call(node, signature):
             missing.append(name)
         elif (
             name not in supplied_by_keyword
-            and not has_kwargs_unpacking
+            and not has_unknown_kwargs
         ):
             missing.append(name)
 
     for name in required_keyword_only:
         if (
             name not in supplied_by_keyword
-            and not has_kwargs_unpacking
+            and not has_unknown_kwargs
         ):
             missing.append(name)
 
     return missing
+
+
+def find_duplicate_arguments(node, signature):
+    """Find arguments supplied more than once in a function call."""
+    positional_names = signature["positional_names"]
+    positional_only_names = set(signature["positional_only_names"])
+
+    keyword_names = [
+        keyword.arg
+        for keyword in node.keywords
+        if keyword.arg is not None
+    ]
+
+    duplicates = []
+
+    # Detect a keyword name repeated more than once.
+    for name in keyword_names:
+        if keyword_names.count(name) > 1 and name not in duplicates:
+            duplicates.append(name)
+
+    # Dynamic starred arguments make positional binding uncertain.
+    if any(isinstance(arg, ast.Starred) for arg in node.args):
+        return duplicates
+
+    # Detect parameters supplied both positionally and by keyword.
+    for index, _arg in enumerate(node.args):
+        if index >= len(positional_names):
+            break
+
+        name = positional_names[index]
+
+        if (
+            name not in positional_only_names
+            and name in keyword_names
+            and name not in duplicates
+        ):
+            duplicates.append(name)
+
+    return duplicates
 
 
 def scan_documentation(source, readme):
@@ -158,8 +214,7 @@ def scan_documentation_from_functions(readme, functions):
             if not isinstance(node, ast.Call):
                 continue
 
-            # Currently handles simple calls such as greet("Manan"),
-            # not attribute calls such as service.greet("Manan").
+            # Only simple calls such as greet("Manan") are supported.
             if not isinstance(node.func, ast.Name):
                 continue
 
@@ -168,12 +223,23 @@ def scan_documentation_from_functions(readme, functions):
             if function_name not in functions:
                 continue
 
-            missing = check_call(node, functions[function_name])
+            signature = functions[function_name]
+            line = block_start_line + node.lineno - 1
+
+            duplicates = find_duplicate_arguments(node, signature)
+
+            if duplicates:
+                names = ", ".join(duplicates)
+                issues.append(
+                    f"README.md:{line}: Invalid call to "
+                    f"'{function_name}': multiple values for "
+                    f"argument(s) {names}"
+                )
+
+            missing = check_call(node, signature)
 
             if missing:
-                line = block_start_line + node.lineno - 1
                 names = ", ".join(missing)
-
                 issues.append(
                     f"README.md:{line}: Possible missing "
                     f"argument(s) for '{function_name}': {names}"
@@ -183,115 +249,45 @@ def scan_documentation_from_functions(readme, functions):
 
 
 def scan_project(project_path):
-    """Scan Python files in a project and check its README."""
-    project_path = Path(project_path).resolve()
-
-    if not project_path.exists():
-        return [
-            f"Error: Project path does not exist: {project_path}"
-        ]
-
-    if not project_path.is_dir():
-        return [
-            f"Error: Project path is not a directory: {project_path}"
-        ]
-
+    """Scan Python files in a project and check README examples."""
+    project_path = Path(project_path)
     readme_path = project_path / "README.md"
 
-    if not readme_path.is_file():
-        return [
-            f"Error: README.md not found in {project_path}"
-        ]
+    if not readme_path.exists():
+        return [f"README.md not found in {project_path}"]
 
     try:
         readme = readme_path.read_text(encoding="utf-8")
     except OSError as error:
-        return [f"Error reading README.md: {error}"]
+        return [f"Could not read README.md: {error}"]
 
-    all_functions = {}
+    functions = {}
     duplicate_names = set()
     issues = []
 
-    for file_path in project_path.rglob("*.py"):
-        relative_path = file_path.relative_to(project_path)
-
-        if any(
-            part in IGNORED_DIRECTORIES
-            for part in relative_path.parts
-        ):
+    for path in project_path.rglob("*.py"):
+        if any(part in IGNORED_DIRS for part in path.parts):
             continue
 
         try:
-            source = file_path.read_text(encoding="utf-8")
-        except OSError as error:
-            issues.append(
-                f"Warning: Could not read {relative_path}: {error}"
-            )
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
 
-        try:
-            ast.parse(source)
-        except SyntaxError as error:
-            issues.append(
-                f"Warning: Invalid Python in {relative_path}, "
-                f"line {error.lineno}: {error.msg}"
-            )
-            continue
+        file_functions = find_functions(source)
 
-        functions = find_functions(source)
-
-        for name, signature in functions.items():
-            if name in all_functions:
+        for name, signature in file_functions.items():
+            if name in functions:
                 duplicate_names.add(name)
             else:
-                all_functions[name] = signature
+                functions[name] = signature
 
-    # Skip ambiguous names rather than guessing which file's function
-    # a README example intends to call.
-    for name in duplicate_names:
-        all_functions.pop(name, None)
-
-    if duplicate_names:
-        names = ", ".join(sorted(duplicate_names))
+    for name in sorted(duplicate_names):
         issues.append(
-            "Warning: Skipped function names found in multiple "
-            f"Python files: {names}"
+            f"Warning: duplicate top-level function name '{name}' "
+            "found in multiple Python files; README checks may be "
+            "ambiguous."
         )
 
-    issues.extend(
-        scan_documentation_from_functions(readme, all_functions)
-    )
-
+    issues.extend(scan_documentation_from_functions(readme, functions))
     return issues
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "SPECWATCH: Check Python function calls in README examples."
-        )
-    )
-
-    parser.add_argument(
-        "--project",
-        default=".",
-        help="Path to the project to scan (default: current directory).",
-    )
-
-    args = parser.parse_args()
-
-    print(f"Scanning project: {args.project}")
-    issues = scan_project(args.project)
-
-    if issues:
-        print("\nFindings:")
-        for issue in issues:
-            print(f"- {issue}")
-    else:
-        print("\nNo issues found.")
-
-    print("\nScan complete.")
-
-
-if __name__ == "__main__":
-    main()

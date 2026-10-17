@@ -20,6 +20,9 @@ def collect(first, *items):
 
 def configure(name, **options):
     return name, options
+
+def positional_only(name, /, greeting):
+    return name, greeting
 """
 
 
@@ -55,8 +58,8 @@ CASES = [
         "should_warn": True,
     },
     {
-        "name": "Positional-only argument supplied incorrectly",
-        "code": 'def example():\n    pass\n',
+        "name": "Positional-only definition",
+        "code": "def example():\n    pass",
         "should_warn": False,
     },
     {
@@ -74,21 +77,68 @@ CASES = [
         "code": "add(*[1, 2])",
         "should_warn": False,
     },
-    
     {
         "name": "Dictionary unpacking in a call",
         "code": 'greet(**{"name": "Manan", "greeting": "Hello"})',
         "should_warn": False,
     },
-
-
     {
         "name": "Nested function call with missing argument",
         "code": 'greet(str("Manan"))',
         "should_warn": True,
     },
-
-    
+    {
+        "name": "Missing argument when using a keyword",
+        "code": 'greet(name="Manan")',
+        "should_warn": True,
+    },
+    {
+        "name": "Keyword arguments in a different order",
+        "code": 'greet(greeting="Hello", name="Manan")',
+        "should_warn": False,
+    },
+    {
+        "name": "Incomplete list unpacking",
+        "code": 'greet(*["Manan"])',
+        "should_warn": True,
+    },
+    {
+        "name": "Complete list unpacking",
+        "code": 'greet(*["Manan", "Hello"])',
+        "should_warn": False,
+    },
+    {
+        "name": "Incomplete dictionary unpacking",
+        "code": 'greet(**{"name": "Manan"})',
+        "should_warn": True,
+    },
+    {
+        "name": "Complete dictionary unpacking",
+        "code": 'greet(**{"name": "Manan", "greeting": "Hello"})',
+        "should_warn": False,
+    },
+    {
+        "name": "Dynamic starred arguments",
+        "code": "greet(*args)",
+        "should_warn": False,
+    },
+    {
+        "name": "Dynamic keyword unpacking",
+        "code": "greet(**kwargs)",
+        "should_warn": False,
+    },
+    {
+        "name": "Positional-only parameter passed by keyword",
+        "code": (
+            'positional_only(name="Manan", greeting="Hello")'
+        ),
+        "should_warn": True,
+    },
+    {
+        "name": "Duplicate positional and keyword argument",
+        "code": 'greet("Manan", name="Other", greeting="Hello")',
+        "should_warn": True,
+    },
 ]
 
 
@@ -132,7 +182,7 @@ def main():
 
     total = len(CASES)
     correct = true_positive + true_negative
-    accuracy = correct / total * 100
+    accuracy = correct / total * 100 if total else 0
 
     print("\n" + "=" * 45)
     print(f"Total cases:      {total}")
@@ -144,17 +194,20 @@ def main():
 
     if true_positive + false_positive:
         precision = (
-            true_positive / (true_positive + false_positive) * 100
+            true_positive
+            / (true_positive + false_positive)
+            * 100
         )
         print(f"Precision:        {precision:.1f}%")
 
     if true_positive + false_negative:
         recall = (
-            true_positive / (true_positive + false_negative) * 100
+            true_positive
+            / (true_positive + false_negative)
+            * 100
         )
         print(f"Recall:           {recall:.1f}%")
 
 
 if __name__ == "__main__":
     main()
- 
